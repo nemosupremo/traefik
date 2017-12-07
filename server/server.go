@@ -1153,8 +1153,11 @@ func (s *Server) loadConfig(configurations types.Configurations, globalConfigura
 
 						auth := &types.Auth{}
 						auth.Basic = &types.Basic{
-							Users: users,
+							Users:                users,
+							WhitelistSourceRange: frontend.WhitelistSourceRange,
+							WhitelistTrustProxy:  frontend.WhitelistTrustProxy,
 						}
+
 						authMiddleware, err := mauth.NewAuthenticator(auth)
 						if err != nil {
 							log.Errorf("Error creating Auth: %s", err)
