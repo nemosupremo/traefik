@@ -32,7 +32,7 @@ func (p *Provider) buildConfiguration() *types.Configuration {
 		"getFrontendBackend": getFrontendBackend,
 		"getID":              getID,
 		"getFrontEndName":    getFrontEndName,
-		"getIsPublic":        getIsPublic,
+		"hasLabel":           hasLabel,
 	}
 
 	rg := records.NewRecordGenerator(time.Duration(p.StateTimeoutSecond) * time.Second)
@@ -221,8 +221,13 @@ func (p *Provider) getSubDomain(name string) string {
 
 // Label functions
 
-func getIsPublic(task state.Task) bool {
-	return getBoolValue(task, label.Prefix+"isPublic", false)
+func hasLabel(task state.Task, labelName string) bool {
+	for _, lbl := range task.Labels {
+		if lbl.Key == labelName {
+			return true
+		}
+	}
+	return false
 }
 
 func getFuncApplicationStringValue(labelName string, defaultValue string) func(task state.Task, applications []state.Task) string {
