@@ -1151,11 +1151,12 @@ func (s *Server) loadConfig(configurations types.Configurations, globalConfigura
 							users = append(users, user)
 						}
 
-						auth := &types.Auth{}
-						auth.Basic = &types.Basic{
-							Users:                users,
+						auth := &types.Auth{
 							WhitelistSourceRange: frontend.WhitelistSourceRange,
 							WhitelistTrustProxy:  frontend.WhitelistTrustProxy,
+						}
+						auth.Basic = &types.Basic{
+							Users: users,
 						}
 
 						authMiddleware, err := mauth.NewAuthenticator(auth)
