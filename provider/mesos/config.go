@@ -33,6 +33,7 @@ func (p *Provider) buildConfiguration() *types.Configuration {
 		"getID":              getID,
 		"getFrontEndName":    getFrontEndName,
 		"hasLabel":           hasLabel,
+		"getStringValue":     getStringValue,
 	}
 
 	rg := records.NewRecordGenerator(time.Duration(p.StateTimeoutSecond) * time.Second)
