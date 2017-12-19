@@ -142,19 +142,21 @@ func (h Headers) HasSecureHeadersDefined() bool {
 
 // Frontend holds frontend configuration.
 type Frontend struct {
-	EntryPoints          []string             `json:"entryPoints,omitempty"`
-	Backend              string               `json:"backend,omitempty"`
-	Routes               map[string]Route     `json:"routes,omitempty"`
-	PassHostHeader       bool                 `json:"passHostHeader,omitempty"`
-	PassTLSCert          bool                 `json:"passTLSCert,omitempty"`
-	Priority             int                  `json:"priority"`
-	BasicAuth            []string             `json:"basicAuth"`
-	WhitelistSourceRange []string             `json:"whitelistSourceRange,omitempty"`
-	WhitelistTrustProxy  []string             `json:"whitelistTrustProxy,omitempty"`
-	Headers              Headers              `json:"headers,omitempty"`
-	Errors               map[string]ErrorPage `json:"errors,omitempty"`
-	RateLimit            *RateLimit           `json:"ratelimit,omitempty"`
-	Redirect             string               `json:"redirect,omitempty"`
+	EntryPoints              []string             `json:"entryPoints,omitempty"`
+	Backend                  string               `json:"backend,omitempty"`
+	Routes                   map[string]Route     `json:"routes,omitempty"`
+	PassHostHeader           bool                 `json:"passHostHeader,omitempty"`
+	PassTLSCert              bool                 `json:"passTLSCert,omitempty"`
+	Priority                 int                  `json:"priority"`
+	BasicAuth                []string             `json:"basicAuth"`
+	WhitelistSourceRange     []string             `json:"whitelistSourceRange,omitempty"`
+	WhitelistTrustProxy      []string             `json:"whitelistTrustProxy,omitempty"`
+	AuthWhitelistSourceRange []string             `json:"authWhitelistSourceRange,omitempty"`
+	AuthWhitelistTrustProxy  []string             `json:"authWhitelistTrustProxy,omitempty"`
+	Headers                  Headers              `json:"headers,omitempty"`
+	Errors                   map[string]ErrorPage `json:"errors,omitempty"`
+	RateLimit                *RateLimit           `json:"ratelimit,omitempty"`
+	Redirect                 string               `json:"redirect,omitempty"`
 }
 
 // LoadBalancerMethod holds the method of load balancing to use.

@@ -1152,8 +1152,8 @@ func (s *Server) loadConfig(configurations types.Configurations, globalConfigura
 						}
 
 						auth := &types.Auth{
-							WhitelistSourceRange: frontend.WhitelistSourceRange,
-							WhitelistTrustProxy:  frontend.WhitelistTrustProxy,
+							WhitelistSourceRange: frontend.AuthWhitelistSourceRange,
+							WhitelistTrustProxy:  frontend.AuthWhitelistTrustProxy,
 						}
 						auth.Basic = &types.Basic{
 							Users: users,
