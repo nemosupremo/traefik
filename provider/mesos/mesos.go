@@ -280,6 +280,7 @@ func (p *Provider) subscribeMesos(masters []string) (<-chan state.Task, <-chan s
 			continue
 		}
 		subscribeResp = resp
+		break
 	}
 	if subscribeResp == nil {
 		return nil, nil
