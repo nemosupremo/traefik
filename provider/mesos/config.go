@@ -43,6 +43,10 @@ func (p *Provider) buildConfiguration() (*types.Configuration, []state.Task) {
 		return nil, nil
 	}
 	tasks := taskRecords(st)
+	if len(tasks) == 0 {
+		log.Warnf("No tasks returned from mesos.")
+		return nil, nil
+	}
 
 	// filter tasks
 	filteredTasks := fun.Filter(func(task state.Task) bool {
