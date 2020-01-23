@@ -3,7 +3,6 @@ package mesos
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,13 +16,6 @@ import (
 	"github.com/containous/traefik/provider"
 	"github.com/containous/traefik/safe"
 	"github.com/containous/traefik/types"
-	"github.com/mesos/mesos-go/detector"
-	// Register mesos zoo the detector
-	_ "github.com/mesos/mesos-go/detector/zoo"
-	"github.com/mesosphere/mesos-dns/detect"
-	"github.com/mesosphere/mesos-dns/logging"
-	"github.com/mesosphere/mesos-dns/records/state"
-	"github.com/mesosphere/mesos-dns/util"
 )
 
 var _ provider.Provider = (*Provider)(nil)
@@ -39,10 +31,14 @@ type Provider struct {
 	RefreshSeconds        int    `description:"Polling interval (in seconds)" export:"true"`
 	IPSources             string `description:"IPSources (e.g. host, docker, mesos, rkt)" export:"true"`
 	StateTimeoutSecond    int    `description:"HTTP Timeout (in seconds)" export:"true"`
-	Masters               []string
 	Subscribe             bool   `description:"Subscribe to Mesos task events (Mesos 1.1 or later only)" export:"true"`
 	SubscribeLabels       string `description:"Filter subscriptions to only tasks with these labels" export:"true"`
 	SubscribeFilterLabels []string
+	master                struct {
+		Hosts    []string
+		Protocol string
+		Updated  time.Time
+	}
 }
 
 type mesosEvent struct {
@@ -80,46 +76,26 @@ type mesosEvent struct {
 // using the given configuration channel.
 func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *safe.Pool, constraints types.Constraints) error {
 	operation := func() error {
-
 		// initialize logging
-		logging.SetupLogs()
 
 		log.Debugf("%s", p.IPSources)
 
-		var zk string
-		var masters []string
 		var reload *time.Ticker
-		var taskAddedChan <-chan state.Task
-		var taskUpdatedChan <-chan state.Task
-
-		if strings.HasPrefix(p.Endpoint, "zk://") {
-			zk = p.Endpoint
-		} else {
-			masters = strings.Split(p.Endpoint, ",")
-		}
+		var taskAddedChan <-chan mesosTask
+		var taskUpdatedChan <-chan mesosTask
 
 		errch := make(chan error)
-		subscribed := false
 
-		changed := detectMasters(zk, masters)
 		if p.RefreshSeconds == 0 {
 			reload = time.NewTicker(time.Second * 100)
 		} else {
 			reload = time.NewTicker(time.Second * time.Duration(p.RefreshSeconds))
 		}
-		zkTimeout := time.Second * time.Duration(p.ZkDetectionTimeout)
-		timeout := time.AfterFunc(zkTimeout, func() {
-			if zkTimeout > 0 {
-				errch <- fmt.Errorf("master detection timed out after %s", zkTimeout)
-			}
-		})
 
 		defer reload.Stop()
-		defer util.HandleCrash()
 
 		if !p.Watch {
 			reload.Stop()
-			timeout.Stop()
 		}
 		if p.RefreshSeconds == 0 {
 			reload.Stop()
@@ -130,7 +106,7 @@ func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *s
 		}
 
 		runningTasks := make(map[string]string)
-		updateTasks := func(tasks []state.Task) {
+		updateTasks := func(tasks []*mesosTask) {
 			for k, v := range runningTasks {
 				if v != "ADDED" {
 					delete(runningTasks, k)
@@ -141,8 +117,34 @@ func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *s
 			}
 		}
 
+		if _, _, err := p.getMesosMaster(true); err != nil {
+			return err
+		}
+
+		configuration, tasks := p.buildConfiguration()
+		if configuration != nil {
+			updateTasks(tasks)
+			configurationChan <- types.ConfigMessage{
+				ProviderName:  "mesos",
+				Configuration: configuration,
+			}
+		}
+
 		for {
+			var cooldown chan time.Time
+			if p.Subscribe && taskAddedChan == nil {
+				p.getMesosMaster(true)
+				taskAddedChan, taskUpdatedChan = p.subscribeMesos()
+				if taskAddedChan == nil {
+					cooldown = make(chan time.Time)
+					go func() {
+						time.Sleep(5 * time.Second)
+						cooldown <- time.Now()
+					}()
+				}
+			}
 			select {
+			case <-cooldown:
 			case <-reload.C:
 				configuration, tasks := p.buildConfiguration()
 				if configuration != nil {
@@ -160,22 +162,12 @@ func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *s
 						runningTasks[task.ID] = "ADDED"
 					}
 				} else {
-					// the subscribe listener closed, restart it (maybe
-					// there was a leader re-election).
-					if len(p.Masters) == 0 {
-						subscribed = false
-						taskAddedChan = nil
-					} else {
-						taskAddedChan, taskUpdatedChan = p.subscribeMesos(p.Masters)
-						if taskAddedChan == nil {
-							subscribed = false
-						}
-					}
+					taskAddedChan = nil
 				}
 			case task, ok := <-taskUpdatedChan:
 				if ok {
 					var configuration *types.Configuration
-					var tasks []state.Task
+					var tasks []*mesosTask
 					if taskStatus, ok := runningTasks[task.ID]; ok {
 						if taskStatus == "ADDED" {
 							if task.State == "RUNNING" {
@@ -204,27 +196,6 @@ func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *s
 				} else {
 					taskUpdatedChan = nil
 				}
-			case masters := <-changed:
-				if len(masters) == 0 || masters[0] == "" {
-					// no leader
-					timeout.Reset(zkTimeout)
-				} else {
-					timeout.Stop()
-				}
-				log.Debugf("new masters detected: %v", masters)
-				p.Masters = masters
-				if p.Subscribe && len(masters) > 0 && !subscribed {
-					taskAddedChan, taskUpdatedChan = p.subscribeMesos(p.Masters)
-					subscribed = taskAddedChan != nil
-				}
-				configuration, tasks := p.buildConfiguration()
-				if configuration != nil {
-					updateTasks(tasks)
-					configurationChan <- types.ConfigMessage{
-						ProviderName:  "mesos",
-						Configuration: configuration,
-					}
-				}
 			case err := <-errch:
 				log.Errorf("%s", err)
 			}
@@ -241,29 +212,19 @@ func (p *Provider) Provide(configurationChan chan<- types.ConfigMessage, pool *s
 	return nil
 }
 
-func detectMasters(zk string, masters []string) <-chan []string {
-	changed := make(chan []string, 1)
-	if zk != "" {
-		log.Debugf("Starting master detector for ZK ", zk)
-		if md, err := detector.New(zk); err != nil {
-			log.Errorf("Failed to create master detector: %v", err)
-		} else if err := md.Detect(detect.NewMasters(masters, changed)); err != nil {
-			log.Errorf("Failed to initialize master detector: %v", err)
-		}
-	} else {
-		changed <- masters
-	}
-	return changed
-}
-
-func (p *Provider) subscribeMesos(masters []string) (<-chan state.Task, <-chan state.Task) {
+func (p *Provider) subscribeMesos() (<-chan mesosTask, <-chan mesosTask) {
 	var subscribeResp *http.Response
 	var masterUri url.URL
+
+	masters, protocol, err := p.getMesosMaster(false)
+	if err != nil {
+		return nil, nil
+	}
 
 	for _, master := range masters {
 		log.Debugf("Attempting to connect to master %v", master)
 		masterUri = url.URL{
-			Scheme: "http",
+			Scheme: protocol,
 			Host:   master,
 			Path:   "api/v1",
 		}
@@ -286,8 +247,8 @@ func (p *Provider) subscribeMesos(masters []string) (<-chan state.Task, <-chan s
 		return nil, nil
 	}
 
-	taskAdded := make(chan state.Task)
-	taskUpdated := make(chan state.Task)
+	taskAdded := make(chan mesosTask)
+	taskUpdated := make(chan mesosTask)
 	go func(resp *http.Response) {
 		defer func() {
 			close(taskAdded)
@@ -325,7 +286,7 @@ func (p *Provider) subscribeMesos(masters []string) (<-chan state.Task, <-chan s
 							for _, label := range p.SubscribeFilterLabels {
 								for _, taskLabel := range event.TaskAdded.Task.Labels.Labels {
 									if taskLabel.Key == label {
-										taskAdded <- state.Task{
+										taskAdded <- mesosTask{
 											ID: event.TaskAdded.Task.TaskId.Value,
 										}
 										break matchLabel
@@ -334,7 +295,7 @@ func (p *Provider) subscribeMesos(masters []string) (<-chan state.Task, <-chan s
 							}
 						}
 					} else if event.Type == "TASK_UPDATED" {
-						t := state.Task{
+						t := mesosTask{
 							ID: event.TaskUpdated.Status.TaskId.Value,
 						}
 						switch event.TaskUpdated.State {

@@ -3,21 +3,19 @@ package mesos
 import (
 	"fmt"
 	"math"
+	"net"
 	"strconv"
 	"strings"
 	"text/template"
-	"time"
 
 	"github.com/BurntSushi/ty/fun"
 	"github.com/containous/traefik/log"
 	"github.com/containous/traefik/provider"
 	"github.com/containous/traefik/provider/label"
 	"github.com/containous/traefik/types"
-	"github.com/mesosphere/mesos-dns/records"
-	"github.com/mesosphere/mesos-dns/records/state"
 )
 
-func (p *Provider) buildConfiguration() (*types.Configuration, []state.Task) {
+func (p *Provider) buildConfiguration() (*types.Configuration, []*mesosTask) {
 	var mesosFuncMap = template.FuncMap{
 		"getBackend":         getBackend,
 		"getPort":            p.getPort,
@@ -36,37 +34,34 @@ func (p *Provider) buildConfiguration() (*types.Configuration, []state.Task) {
 		"getStringValue":     getStringValue,
 	}
 
-	rg := records.NewRecordGenerator(time.Duration(p.StateTimeoutSecond) * time.Second)
-	st, err := rg.FindMaster(p.Masters...)
+	st, err := p.getMesosState()
 	if err != nil {
 		log.Errorf("Failed to create a client for Mesos, error: %v", err)
 		return nil, nil
 	}
+
 	tasks := taskRecords(st)
-	if len(tasks) == 0 {
-		log.Warnf("No tasks returned from mesos.")
-		return nil, nil
-	}
 
 	// filter tasks
-	filteredTasks := fun.Filter(func(task state.Task) bool {
+	filteredTasks := fun.Filter(func(task *mesosTask) bool {
 		return taskFilter(task, p.ExposedByDefault)
-	}, tasks).([]state.Task)
+	}, tasks).([]*mesosTask)
 
-	uniqueApps := make(map[string]state.Task)
+	uniqueApps := make(map[string]*mesosTask)
 	for _, value := range filteredTasks {
-		if _, ok := uniqueApps[value.DiscoveryInfo.Name]; !ok {
-			uniqueApps[value.DiscoveryInfo.Name] = value
+		if _, ok := uniqueApps[value.Discovery.Name]; !ok {
+			uniqueApps[value.Discovery.Name] = value
 		}
 	}
-	var filteredApps []state.Task
+
+	var filteredApps []*mesosTask
 	for _, value := range uniqueApps {
 		filteredApps = append(filteredApps, value)
 	}
 
 	templateObjects := struct {
-		Applications []state.Task
-		Tasks        []state.Task
+		Applications []*mesosTask
+		Tasks        []*mesosTask
 		Domain       string
 	}{
 		Applications: filteredApps,
@@ -81,13 +76,18 @@ func (p *Provider) buildConfiguration() (*types.Configuration, []state.Task) {
 	return configuration, templateObjects.Tasks
 }
 
-func taskRecords(st state.State) []state.Task {
-	var tasks []state.Task
+func taskRecords(st *mesosState) []*mesosTask {
+	var tasks []*mesosTask
 	for _, f := range st.Frameworks {
 		for _, task := range f.Tasks {
 			for _, slave := range st.Slaves {
 				if task.SlaveID == slave.ID {
-					task.SlaveIP = slave.PID.Host
+					splits := strings.Split(slave.PID, "@")
+					if len(splits) == 2 {
+						if _, err := net.ResolveTCPAddr("tcp4", splits[1]); err == nil {
+							task.SlaveIP, _, _ = net.SplitHostPort(splits[1])
+						}
+					}
 				}
 			}
 
@@ -101,13 +101,13 @@ func taskRecords(st state.State) []state.Task {
 	return tasks
 }
 
-func taskFilter(task state.Task, exposedByDefaultFlag bool) bool {
-	if len(task.DiscoveryInfo.Ports.DiscoveryPorts) == 0 {
+func taskFilter(task *mesosTask, exposedByDefaultFlag bool) bool {
+	if len(task.Discovery.Ports.Ports) == 0 {
 		log.Debugf("Filtering Mesos task without port %s", task.Name)
 		return false
 	}
 	if !isEnabled(task, exposedByDefaultFlag) {
-		log.Debugf("Filtering disabled Mesos task %s", task.DiscoveryInfo.Name)
+		log.Debugf("Filtering disabled Mesos task %s", task.Discovery.Name)
 		return false
 	}
 
@@ -120,7 +120,7 @@ func taskFilter(task state.Task, exposedByDefaultFlag bool) bool {
 	}
 	if portIndexLabel != "" {
 		index, err := strconv.Atoi(portIndexLabel)
-		if err != nil || index < 0 || index > len(task.DiscoveryInfo.Ports.DiscoveryPorts)-1 {
+		if err != nil || index < 0 || index > len(task.Discovery.Ports.Ports)-1 {
 			log.Debugf("Filtering Mesos task %s with unexpected value for %q label", task.Name, label.TraefikPortIndex)
 			return false
 		}
@@ -133,7 +133,7 @@ func taskFilter(task state.Task, exposedByDefaultFlag bool) bool {
 		}
 
 		var foundPort bool
-		for _, exposedPort := range task.DiscoveryInfo.Ports.DiscoveryPorts {
+		for _, exposedPort := range task.Discovery.Ports.Ports {
 			if port == exposedPort.Number {
 				foundPort = true
 				break
@@ -147,19 +147,21 @@ func taskFilter(task state.Task, exposedByDefaultFlag bool) bool {
 	}
 
 	//filter healthChecks
-	if task.Statuses != nil && len(task.Statuses) > 0 && task.Statuses[0].Healthy != nil && !*task.Statuses[0].Healthy {
-		log.Debugf("Filtering Mesos task %s with bad healthCheck", task.DiscoveryInfo.Name)
-		return false
+	/*
+		if task.Statuses != nil && len(task.Statuses) > 0 && task.Statuses[0].Healthy != nil && !*task.Statuses[0].Healthy {
+			log.Debugf("Filtering Mesos task %s with bad healthCheck", task.Discovery.Name)
+			return false
 
-	}
+		}
+	*/
 	return true
 }
 
-func getID(task state.Task) string {
+func getID(task *mesosTask) string {
 	return provider.Normalize(task.ID)
 }
 
-func getBackend(task state.Task, apps []state.Task) string {
+func getBackend(task *mesosTask, apps []*mesosTask) string {
 	application, err := getApplication(task, apps)
 	if err != nil {
 		log.Error(err)
@@ -168,34 +170,34 @@ func getBackend(task state.Task, apps []state.Task) string {
 	return getFrontendBackend(application)
 }
 
-func getFrontendBackend(task state.Task) string {
+func getFrontendBackend(task *mesosTask) string {
 	if value := getStringValue(task, label.TraefikBackend, ""); len(value) > 0 {
 		return value
 	}
-	return "-" + provider.Normalize(task.DiscoveryInfo.Name)
+	return "-" + provider.Normalize(task.Discovery.Name)
 }
 
-func getFrontEndName(task state.Task) string {
+func getFrontEndName(task *mesosTask) string {
 	return provider.Normalize(task.ID)
 }
 
-func (p *Provider) getPort(task state.Task, applications []state.Task) string {
+func (p *Provider) getPort(task *mesosTask, applications []*mesosTask) string {
 	application, err := getApplication(task, applications)
 	if err != nil {
 		log.Error(err)
 		return ""
 	}
 
-	plv := getIntValue(application, label.TraefikPortIndex, math.MinInt32, len(task.DiscoveryInfo.Ports.DiscoveryPorts)-1)
+	plv := getIntValue(application, label.TraefikPortIndex, math.MinInt32, len(task.Discovery.Ports.Ports)-1)
 	if plv >= 0 {
-		return strconv.Itoa(task.DiscoveryInfo.Ports.DiscoveryPorts[plv].Number)
+		return strconv.Itoa(task.Discovery.Ports.Ports[plv].Number)
 	}
 
 	if pv := getStringValue(application, label.TraefikPort, ""); len(pv) > 0 {
 		return pv
 	}
 
-	for _, port := range task.DiscoveryInfo.Ports.DiscoveryPorts {
+	for _, port := range task.Discovery.Ports.Ports {
 		return strconv.Itoa(port.Number)
 	}
 	return ""
@@ -203,15 +205,16 @@ func (p *Provider) getPort(task state.Task, applications []state.Task) string {
 
 // getFrontendRule returns the frontend rule for the specified application, using
 // it's label. It returns a default one (Host) if the label is not present.
-func (p *Provider) getFrontendRule(task state.Task) string {
+func (p *Provider) getFrontendRule(task *mesosTask) string {
 	if v := getStringValue(task, label.TraefikFrontendRule, ""); len(v) > 0 {
 		return v
 	}
-	return "Host:" + strings.ToLower(strings.Replace(p.getSubDomain(task.DiscoveryInfo.Name), "_", "-", -1)) + "." + p.Domain
+	return "Host:" + strings.ToLower(strings.Replace(p.getSubDomain(task.Discovery.Name), "_", "-", -1)) + "." + p.Domain
 }
 
-func (p *Provider) getHost(task state.Task) string {
-	return task.IP(strings.Split(p.IPSources, ",")...)
+func (p *Provider) getHost(task *mesosTask) string {
+	// IPSources is always host
+	return task.SlaveIP
 }
 
 func (p *Provider) getSubDomain(name string) string {
@@ -226,7 +229,7 @@ func (p *Provider) getSubDomain(name string) string {
 
 // Label functions
 
-func hasLabel(task state.Task, labelName string) bool {
+func hasLabel(task *mesosTask, labelName string) bool {
 	for _, lbl := range task.Labels {
 		if lbl.Key == labelName {
 			return true
@@ -235,8 +238,8 @@ func hasLabel(task state.Task, labelName string) bool {
 	return false
 }
 
-func getFuncApplicationStringValue(labelName string, defaultValue string) func(task state.Task, applications []state.Task) string {
-	return func(task state.Task, applications []state.Task) string {
+func getFuncApplicationStringValue(labelName string, defaultValue string) func(task *mesosTask, applications []*mesosTask) string {
+	return func(task *mesosTask, applications []*mesosTask) string {
 		app, err := getApplication(task, applications)
 		if err == nil {
 			return getStringValue(app, labelName, defaultValue)
@@ -246,19 +249,19 @@ func getFuncApplicationStringValue(labelName string, defaultValue string) func(t
 	}
 }
 
-func getFuncStringValue(labelName string, defaultValue string) func(task state.Task) string {
-	return func(task state.Task) string {
+func getFuncStringValue(labelName string, defaultValue string) func(task *mesosTask) string {
+	return func(task *mesosTask) string {
 		return getStringValue(task, labelName, defaultValue)
 	}
 }
 
-func getFuncSliceStringValue(labelName string) func(task state.Task) []string {
-	return func(task state.Task) []string {
+func getFuncSliceStringValue(labelName string) func(task *mesosTask) []string {
+	return func(task *mesosTask) []string {
 		return getSliceStringValue(task, labelName)
 	}
 }
 
-func getStringValue(task state.Task, labelName string, defaultValue string) string {
+func getStringValue(task *mesosTask, labelName string, defaultValue string) string {
 	for _, lbl := range task.Labels {
 		if lbl.Key == labelName {
 			return lbl.Value
@@ -267,7 +270,7 @@ func getStringValue(task state.Task, labelName string, defaultValue string) stri
 	return defaultValue
 }
 
-func getBoolValue(task state.Task, labelName string, defaultValue bool) bool {
+func getBoolValue(task *mesosTask, labelName string, defaultValue bool) bool {
 	for _, lbl := range task.Labels {
 		if lbl.Key == labelName {
 			v, err := strconv.ParseBool(lbl.Value)
@@ -279,7 +282,7 @@ func getBoolValue(task state.Task, labelName string, defaultValue bool) bool {
 	return defaultValue
 }
 
-func getIntValue(task state.Task, labelName string, defaultValue int, maxValue int) int {
+func getIntValue(task *mesosTask, labelName string, defaultValue int, maxValue int) int {
 	for _, lbl := range task.Labels {
 		if lbl.Key == labelName {
 			value, err := strconv.Atoi(lbl.Value)
@@ -296,7 +299,7 @@ func getIntValue(task state.Task, labelName string, defaultValue int, maxValue i
 	return defaultValue
 }
 
-func getSliceStringValue(task state.Task, labelName string) []string {
+func getSliceStringValue(task *mesosTask, labelName string) []string {
 	for _, lbl := range task.Labels {
 		if lbl.Key == labelName {
 			return label.SplitAndTrimString(lbl.Value, ",")
@@ -305,15 +308,15 @@ func getSliceStringValue(task state.Task, labelName string) []string {
 	return nil
 }
 
-func getApplication(task state.Task, apps []state.Task) (state.Task, error) {
+func getApplication(task *mesosTask, apps []*mesosTask) (*mesosTask, error) {
 	for _, app := range apps {
-		if app.DiscoveryInfo.Name == task.DiscoveryInfo.Name {
+		if app.Discovery.Name == task.Discovery.Name {
 			return app, nil
 		}
 	}
-	return state.Task{}, fmt.Errorf("unable to get Mesos application from task %s", task.DiscoveryInfo.Name)
+	return nil, fmt.Errorf("unable to get Mesos application from task %s", task.Discovery.Name)
 }
 
-func isEnabled(task state.Task, exposedByDefault bool) bool {
+func isEnabled(task *mesosTask, exposedByDefault bool) bool {
 	return getBoolValue(task, label.TraefikEnable, exposedByDefault)
 }
